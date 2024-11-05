@@ -191,9 +191,17 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gray-100 dark:bg-gray-900 p-4">
       <div className="max-w-md mx-auto">
-        <h1 className="text-3xl font-bold mb-6 text-gray-800 dark:text-white">
-          Alcohol Consumption Tracker
-        </h1>
+        <div className="flex flex-col mb-6">
+          <h1 className="text-3xl font-bold mb-2 text-gray-800 dark:text-white">
+            Alcohol Consumption Tracker
+          </h1>
+          <button
+            onClick={downloadAllUsersCSV}
+            className="px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500 w-fit"
+          >
+            Download All Users Data
+          </button>
+        </div>
         
         {/* Waiting Time Settings */}
         <div className="mb-6 p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
@@ -210,7 +218,7 @@ export default function App() {
           </div>
         </div>
         
-        {/* User ID Input and All Users Download */}
+        {/* User ID Input */}
         <div className="mb-6 flex gap-2 items-center">
           <input
             type="text"
@@ -224,12 +232,6 @@ export default function App() {
             className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
             Search
-          </button>
-          <button
-            onClick={downloadAllUsersCSV}
-            className="px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
-          >
-            Download All
           </button>
         </div>
 
