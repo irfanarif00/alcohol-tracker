@@ -6,10 +6,69 @@
 @media (max-width: 768px) {
   input[type="number"],
   input[type="text"] {
-    font-size: 16px;
+    font-size: 16px; /* Prevents iOS zoom on input focus */
+    -webkit-appearance: none; /* Removes iOS default styling */
+    appearance: none;
+    border-radius: 4px; /* Consistent with design */
   }
   
   button {
-    touch-action: manipulation;
+    touch-action: manipulation; /* Better touch handling */
+    -webkit-tap-highlight-color: transparent; /* Removes tap highlight on iOS */
+  }
+
+  /* Improve touch targets */
+  input,
+  button {
+    min-height: 44px; /* Apple's recommended minimum touch target size */
+  }
+}
+
+/* Smooth scrolling for the whole app */
+html {
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
+}
+
+/* Basic resets and improvements */
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Prevent pull-to-refresh on mobile */
+body {
+  overscroll-behavior-y: contain;
+}
+
+/* Improve number input appearance */
+input[type="number"] {
+  -moz-appearance: textfield; /* Firefox */
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* Focus states for better accessibility */
+input:focus,
+button:focus {
+  outline: 2px solid #3b82f6; /* blue-500 */
+  outline-offset: 2px;
+}
+
+/* Dark mode adjustments if needed */
+@media (prefers-color-scheme: dark) {
+  body {
+    background-color: #1a1a1a;
+    color: #ffffff;
+  }
+  
+  input {
+    background-color: #333;
+    color: #ffffff;
   }
 }
