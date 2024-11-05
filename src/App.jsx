@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { formatDistanceToNow, subHours, differenceInMinutes, addHours, format } from 'date-fns';
+import { formatDistanceToNow, subHours, differenceInMinutes, addMinutes, format } from 'date-fns';
 
 // Utility functions for localStorage
 const getStoredUsers = () => {
@@ -7,8 +7,17 @@ const getStoredUsers = () => {
   return users ? JSON.parse(users) : {};
 };
 
+const getStoredWaitingTime = () => {
+  const time = localStorage.getItem('waitingTime');
+  return time ? parseInt(time, 10) : 60; // Default 60 minutes
+};
+
 const saveUsers = (users) => {
   localStorage.setItem('alcoholTracker', JSON.stringify(users));
+};
+
+const saveWaitingTime = (minutes) => {
+  localStorage.setItem('waitingTime', minutes.toString());
 };
 
 const calculateRecentConsumption = (records, hoursAgo) => {
@@ -19,10 +28,10 @@ const calculateRecentConsumption = (records, hoursAgo) => {
     .reduce((sum, record) => sum + record.amount, 0);
 };
 
-const getWaitingTime = (lastConsumptionTime) => {
+const getWaitingTime = (lastConsumptionTime, waitingMinutes) => {
   const now = new Date();
-  const oneHourAfterLast = addHours(new Date(lastConsumptionTime), 1);
-  const waitMinutes = differenceInMinutes(oneHourAfterLast, now);
+  const waitTimeAfterLast = addMinutes(new Date(lastConsumptionTime), waitingMinutes);
+  const waitMinutes = differenceInMinutes(waitTimeAfterLast, now);
   return waitMinutes > 0 ? waitMinutes : 0;
 };
 
@@ -42,7 +51,7 @@ const downloadCSV = (records, userId) => {
 
   // Add summary data
   csvRows.push([]);  // Empty row
-  csvRows.push(['Total Consumption', '', records.reduce((sum, record) => sum + record.amount, 0) + ' ml']);
+  csvRows.push(['Total Consumption', '', records.reduce((sum, record) => sum + record.amount, 0).toFixed(1) + ' ml']);
   
   // Convert to CSV string
   const csvContent = csvRows.map(row => row.join(',')).join('\n');
@@ -76,7 +85,7 @@ const downloadAllUsersCSV = () => {
         userId,
         format(date, 'yyyy-MM-dd'),
         format(date, 'HH:mm:ss'),
-        record.amount
+        record.amount.toFixed(1)
       ]);
     });
     
@@ -86,7 +95,7 @@ const downloadAllUsersCSV = () => {
       `Total for ${userId}`,
       '',
       '',
-      records.reduce((sum, record) => sum + record.amount, 0) + ' ml'
+      records.reduce((sum, record) => sum + record.amount, 0).toFixed(1) + ' ml'
     ]);
     csvRows.push([]); // Empty row between users
   });
@@ -96,7 +105,7 @@ const downloadAllUsersCSV = () => {
     (total, records) => total + records.reduce((sum, record) => sum + record.amount, 0),
     0
   );
-  csvRows.push(['Grand Total', '', '', grandTotal + ' ml']);
+  csvRows.push(['Grand Total', '', '', grandTotal.toFixed(1) + ' ml']);
 
   // Convert to CSV string
   const csvContent = csvRows.map(row => row.join(',')).join('\n');
@@ -119,6 +128,7 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [amount, setAmount] = useState('');
   const [records, setRecords] = useState([]);
+  const [waitingMinutes, setWaitingMinutes] = useState(getStoredWaitingTime());
 
   // Load and display user data when ID is entered
   const handleSearch = () => {
@@ -152,7 +162,7 @@ export default function App() {
     const users = getStoredUsers();
     const newRecord = {
       timestamp: new Date().toISOString(),
-      amount: parseInt(amount, 10)
+      amount: parseFloat(amount)
     };
     
     users[currentUser] = [...(users[currentUser] || []), newRecord];
@@ -161,124 +171,154 @@ export default function App() {
     setAmount('');
   };
 
+  // Handle waiting time change
+  const handleWaitingTimeChange = (e) => {
+    const newTime = parseInt(e.target.value, 10);
+    if (newTime > 0) {
+      setWaitingMinutes(newTime);
+      saveWaitingTime(newTime);
+    }
+  };
+
   const totalConsumption = records.reduce((sum, record) => sum + record.amount, 0);
   const last2HoursConsumption = calculateRecentConsumption(records, 2);
   const lastConsumptionTime = records.length > 0 ? records[records.length - 1].timestamp : null;
   const minutesSinceLastConsumption = lastConsumptionTime 
     ? differenceInMinutes(new Date(), new Date(lastConsumptionTime))
     : null;
-  const waitingTimeNeeded = lastConsumptionTime ? getWaitingTime(lastConsumptionTime) : 0;
+  const waitingTimeNeeded = lastConsumptionTime ? getWaitingTime(lastConsumptionTime, waitingMinutes) : 0;
 
   return (
-    <div className="p-4 max-w-md mx-auto">
-      <h1 className="text-2xl font-bold mb-4">Alcohol Consumption Tracker</h1>
-      
-      {/* User ID Input and All Users Download */}
-      <div className="mb-4 flex gap-2 items-center">
-        <input
-          type="text"
-          value={userId}
-          onChange={(e) => setUserId(e.target.value)}
-          placeholder="Enter User ID"
-          className="border p-2 rounded flex-grow"
-        />
-        <button
-          onClick={handleSearch}
-          className="bg-blue-500 text-white px-4 py-2 rounded whitespace-nowrap"
-        >
-          Search
-        </button>
-        <button
-          onClick={downloadAllUsersCSV}
-          className="bg-purple-500 text-white px-4 py-2 rounded whitespace-nowrap flex items-center gap-1"
-          title="Download data for all users"
-        >
-          Download All
-        </button>
-      </div>
-
-      {showNewUserPrompt && (
-        <div className="mb-4 p-4 bg-yellow-100 rounded">
-          <p>User not found. Would you like to create a new user?</p>
-          <button
-            onClick={handleCreateUser}
-            className="bg-green-500 text-white px-4 py-2 rounded mt-2"
-          >
-            Create New User
-          </button>
-        </div>
-      )}
-
-      {/* Consumption Warning */}
-      {currentUser && lastConsumptionTime && minutesSinceLastConsumption < 60 && (
-        <div className="mb-4 p-4 bg-red-100 rounded border border-red-500">
-          <p className="text-red-700 font-bold">Warning!</p>
-          <p className="text-red-600">
-            Please wait {waitingTimeNeeded} minutes before next consumption.
-            (Recommended 1 hour between drinks)
-          </p>
-        </div>
-      )}
-
-      {/* Add Record Form */}
-      {currentUser && (
-        <div className="mb-4">
-          <h2 className="text-xl mb-2">Add Consumption Record for User {currentUser}</h2>
-          <form onSubmit={handleAddRecord} className="flex gap-2">
+    <div className="min-h-screen bg-gray-100 dark:bg-gray-900 p-4">
+      <div className="max-w-md mx-auto">
+        <h1 className="text-3xl font-bold mb-6 text-gray-800 dark:text-white">
+          Alcohol Consumption Tracker
+        </h1>
+        
+        {/* Waiting Time Settings */}
+        <div className="mb-6 p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
+          <h3 className="font-bold mb-2 text-gray-800 dark:text-white">Waiting Time Settings</h3>
+          <div className="flex items-center gap-2">
             <input
               type="number"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              placeholder="Amount (ml)"
-              min="0"
-              step="1"
-              className="border p-2 rounded"
+              value={waitingMinutes}
+              onChange={handleWaitingTimeChange}
+              min="1"
+              className="w-20 px-2 py-1 border rounded-lg bg-white dark:bg-gray-700 dark:text-white dark:border-gray-600"
             />
-            <button
-              type="submit"
-              className="bg-green-500 text-white px-4 py-2 rounded"
-            >
-              Add Record
-            </button>
-          </form>
-        </div>
-      )}
-
-      {/* Consumption Statistics */}
-      {currentUser && records.length > 0 && (
-        <div className="mb-4 p-4 bg-blue-50 rounded">
-          <h3 className="font-bold mb-2">Consumption Statistics</h3>
-          <ul className="space-y-1">
-            <li>Total consumption: {totalConsumption} ml</li>
-            <li>Last 2 hours: {last2HoursConsumption} ml</li>
-            <li>Time since last drink: {formatDistanceToNow(new Date(records[records.length - 1].timestamp))}</li>
-          </ul>
-          <button
-            onClick={() => downloadCSV(records, currentUser)}
-            className="mt-3 bg-purple-500 text-white px-4 py-2 rounded flex items-center gap-2"
-          >
-            <span>Download Data (CSV)</span>
-          </button>
-        </div>
-      )}
-
-      {/* Records Display */}
-      {currentUser && records.length > 0 && (
-        <div>
-          <h2 className="text-xl mb-2">Consumption Records</h2>
-          <div className="border rounded p-4">
-            <ul className="space-y-2">
-              {records.map((record, index) => (
-                <li key={index} className="border-b pb-2">
-                  Amount: {record.amount} ml
-                  <br />
-                  Time: {new Date(record.timestamp).toLocaleString()}
-                </li>
-              ))}
-            </ul>
+            <span className="text-gray-700 dark:text-gray-200">minutes between drinks</span>
           </div>
         </div>
-      )}
+        
+        {/* User ID Input and All Users Download */}
+        <div className="mb-6 flex gap-2 items-center">
+          <input
+            type="text"
+            value={userId}
+            onChange={(e) => setUserId(e.target.value)}
+            placeholder="Enter User ID"
+            className="flex-grow px-4 py-2 border rounded-lg bg-white dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <button
+            onClick={handleSearch}
+            className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            Search
+          </button>
+          <button
+            onClick={downloadAllUsersCSV}
+            className="px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
+          >
+            Download All
+          </button>
+        </div>
+
+        {/* New User Prompt */}
+        {showNewUserPrompt && (
+          <div className="mb-6 p-4 bg-yellow-100 dark:bg-yellow-900 rounded-lg">
+            <p className="text-yellow-800 dark:text-yellow-100">User not found. Would you like to create a new user?</p>
+            <button
+              onClick={handleCreateUser}
+              className="mt-2 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500"
+            >
+              Create New User
+            </button>
+          </div>
+        )}
+
+        {/* Consumption Warning */}
+        {currentUser && lastConsumptionTime && minutesSinceLastConsumption < waitingMinutes && (
+          <div className="mb-6 p-4 bg-red-100 dark:bg-red-900 rounded-lg border border-red-500">
+            <p className="font-bold text-red-800 dark:text-red-100">Warning!</p>
+            <p className="text-red-700 dark:text-red-200">
+              Please wait {waitingTimeNeeded} minutes before next consumption.
+              (Recommended {waitingMinutes} minutes between drinks)
+            </p>
+          </div>
+        )}
+
+        {/* Add Record Form */}
+        {currentUser && (
+          <div className="mb-6">
+            <h2 className="text-xl mb-2 font-semibold text-gray-800 dark:text-white">
+              Add Consumption Record for User {currentUser}
+            </h2>
+            <form onSubmit={handleAddRecord} className="flex gap-2">
+              <input
+                type="number"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                placeholder="Amount (ml)"
+                min="0"
+                step="0.1"
+                className="flex-grow px-4 py-2 border rounded-lg bg-white dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <button
+                type="submit"
+                className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500"
+              >
+                Add Record
+              </button>
+            </form>
+          </div>
+        )}
+
+        {/* Consumption Statistics */}
+        {currentUser && records.length > 0 && (
+          <div className="mb-6 p-4 bg-blue-50 dark:bg-blue-900/50 rounded-lg">
+            <h3 className="font-bold mb-2 text-gray-800 dark:text-white">Consumption Statistics</h3>
+            <ul className="space-y-1 text-gray-700 dark:text-gray-200">
+              <li>Total consumption: {totalConsumption.toFixed(1)} ml</li>
+              <li>Last 2 hours: {last2HoursConsumption.toFixed(1)} ml</li>
+              <li>Time since last drink: {formatDistanceToNow(new Date(records[records.length - 1].timestamp))}</li>
+            </ul>
+            <button
+              onClick={() => downloadCSV(records, currentUser)}
+              className="mt-4 px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
+            >
+              Download Data (CSV)
+            </button>
+          </div>
+        )}
+
+        {/* Records Display */}
+        {currentUser && records.length > 0 && (
+          <div>
+            <h2 className="text-xl mb-2 font-semibold text-gray-800 dark:text-white">Consumption Records</h2>
+            <div className="border dark:border-gray-700 rounded-lg p-4">
+              <ul className="space-y-2">
+                {records.map((record, index) => (
+                  <li key={index} className="border-b dark:border-gray-700 pb-2 text-gray-700 dark:text-gray-200">
+                    Amount: {record.amount.toFixed(1)} ml
+                    <br />
+                    Time: {new Date(record.timestamp).toLocaleString()}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
