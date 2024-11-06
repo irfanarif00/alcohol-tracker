@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { formatDistanceToNow, subHours, differenceInMinutes, addMinutes, format } from 'date-fns';
+import { Download } from 'lucide-react';
 
 // Utility functions for localStorage
 const getStoredUsers = () => {
@@ -129,19 +130,41 @@ export default function App() {
   const [amount, setAmount] = useState('');
   const [records, setRecords] = useState([]);
   const [waitingMinutes, setWaitingMinutes] = useState(getStoredWaitingTime());
+  const [suggestions, setSuggestions] = useState([]);
+  const [isInputActive, setIsInputActive] = useState(false);
+
+  // Get suggestions based on input
+  useEffect(() => {
+    if (userId.trim()) {
+      const users = getStoredUsers();
+      const matches = Object.keys(users).filter(id => 
+        id.toLowerCase().includes(userId.toLowerCase())
+      );
+      setSuggestions(matches);
+    } else {
+      setSuggestions([]);
+    }
+  }, [userId]);
 
   // Load and display user data when ID is entered
-  const handleSearch = () => {
+  const handleSearch = (selectedId = userId) => {
     const users = getStoredUsers();
-    if (users[userId]) {
-      setCurrentUser(userId);
-      setRecords(users[userId]);
+    if (users[selectedId]) {
+      setCurrentUser(selectedId);
+      setRecords(users[selectedId]);
       setShowNewUserPrompt(false);
+      setUserId(selectedId);
+      setSuggestions([]);
     } else {
       setShowNewUserPrompt(true);
       setCurrentUser(null);
       setRecords([]);
     }
+  };
+
+  // Handle suggestion selection
+  const handleSuggestionClick = (suggestion) => {
+    handleSearch(suggestion);
   };
 
   // Create new user
@@ -192,15 +215,18 @@ export default function App() {
     <div className="min-h-screen bg-gray-100 dark:bg-gray-900 p-4">
       <div className="max-w-md mx-auto">
         <div className="flex flex-col mb-6">
-          <h1 className="text-3xl font-bold mb-2 text-gray-800 dark:text-white">
-            Alcohol Consumption Tracker
-          </h1>
-          <button
-            onClick={downloadAllUsersCSV}
-            className="px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500 w-fit"
-          >
-            Download All Users Data
-          </button>
+          <div className="flex justify-between items-center">
+            <h1 className="text-3xl font-bold mb-2 text-gray-800 dark:text-white">
+              Alcohol Consumption Tracker
+            </h1>
+            <button
+              onClick={downloadAllUsersCSV}
+              className="text-purple-500 hover:text-purple-600 focus:outline-none"
+              title="Download All Users Data"
+            >
+              <Download size={24} />
+            </button>
+          </div>
         </div>
         
         {/* Waiting Time Settings */}
@@ -218,21 +244,39 @@ export default function App() {
           </div>
         </div>
         
-        {/* User ID Input */}
-        <div className="mb-6 flex gap-2 items-center">
-          <input
-            type="text"
-            value={userId}
-            onChange={(e) => setUserId(e.target.value)}
-            placeholder="Enter User ID"
-            className="flex-grow px-4 py-2 border rounded-lg bg-white dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-          <button
-            onClick={handleSearch}
-            className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            Search
-          </button>
+        {/* User ID Input with Autocomplete */}
+        <div className="mb-6 relative">
+          <div className="flex gap-2 items-center">
+            <input
+              type="text"
+              value={userId}
+              onChange={(e) => setUserId(e.target.value)}
+              onFocus={() => setIsInputActive(true)}
+              placeholder="Enter User ID"
+              className="flex-grow px-4 py-2 border rounded-lg bg-white dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <button
+              onClick={() => handleSearch()}
+              className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              Search
+            </button>
+          </div>
+          
+          {/* Suggestions dropdown */}
+          {suggestions.length > 0 && isInputActive && (
+            <div className="absolute z-10 w-full mt-1 bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg shadow-lg">
+              {suggestions.map((suggestion, index) => (
+                <div
+                  key={index}
+                  className="px-4 py-2 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-800 dark:text-gray-200"
+                  onClick={() => handleSuggestionClick(suggestion)}
+                >
+                  {suggestion}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* New User Prompt */}
@@ -288,18 +332,21 @@ export default function App() {
         {/* Consumption Statistics */}
         {currentUser && records.length > 0 && (
           <div className="mb-6 p-4 bg-blue-50 dark:bg-blue-900/50 rounded-lg">
-            <h3 className="font-bold mb-2 text-gray-800 dark:text-white">Consumption Statistics</h3>
+            <div className="flex justify-between items-center">
+              <h3 className="font-bold mb-2 text-gray-800 dark:text-white">Consumption Statistics</h3>
+              <button
+                onClick={() => downloadCSV(records, currentUser)}
+                className="text-purple-500 hover:text-purple-600 focus:outline-none"
+                title="Download User Data"
+              >
+                <Download size={20} />
+              </button>
+            </div>
             <ul className="space-y-1 text-gray-700 dark:text-gray-200">
               <li>Total consumption: {totalConsumption.toFixed(1)} ml</li>
               <li>Last 2 hours: {last2HoursConsumption.toFixed(1)} ml</li>
               <li>Time since last drink: {formatDistanceToNow(new Date(records[records.length - 1].timestamp))}</li>
             </ul>
-            <button
-              onClick={() => downloadCSV(records, currentUser)}
-              className="mt-4 px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
-            >
-              Download Data (CSV)
-            </button>
           </div>
         )}
 
