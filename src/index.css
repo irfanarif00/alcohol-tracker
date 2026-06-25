@@ -2,13 +2,23 @@
 @tailwind components;
 @tailwind utilities;
 
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  /* Smooth the light/dark theme switch */
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
 /* Mobile optimizations */
 @media (max-width: 768px) {
   input[type="number"],
   input[type="text"] {
     font-size: 16px;
   }
-  
+
   button {
     touch-action: manipulation;
   }

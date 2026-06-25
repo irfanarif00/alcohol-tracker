@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
-import { formatDistanceToNow, subHours, differenceInMinutes, addMinutes, format } from 'date-fns';
-import { Download } from 'lucide-react';
+import { formatDistanceToNow, subHours, subMinutes, differenceInMinutes, addMinutes, format } from 'date-fns';
+import { Download, Settings, X, CheckCircle2, Clock, AlertTriangle, Sun, Moon } from 'lucide-react';
+import { ResponsiveContainer, BarChart, Bar, XAxis, LabelList } from 'recharts';
 
 // Utility functions for localStorage
 const getStoredUsers = () => {
@@ -21,12 +22,58 @@ const saveWaitingTime = (minutes) => {
   localStorage.setItem('waitingTime', minutes.toString());
 };
 
+// Percentage thresholds (of the wait still remaining), persisted in localStorage
+const getStoredPct = (key, fallback) => {
+  const v = localStorage.getItem(key);
+  const n = v != null ? parseInt(v, 10) : NaN;
+  return Number.isFinite(n) ? n : fallback;
+};
+
+const getInitialTheme = () => {
+  try {
+    const stored = localStorage.getItem('theme');
+    if (stored === 'light' || stored === 'dark') return stored;
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) return 'dark';
+  } catch (e) { /* ignore */ }
+  return 'light';
+};
+
+// Normalize a user ID so entry/search is case-insensitive
+const normalizeId = (id) => id.trim().toLowerCase();
+
+// Preset amount (ml) shortcuts for quick entry
+const AMOUNT_PRESETS = [0.25, 0.5, 0.75, 0.8, 0.9, 1, 1.2, 1.5];
+
 const calculateRecentConsumption = (records, hoursAgo) => {
   const now = new Date();
   const cutoffTime = subHours(now, hoursAgo);
   return records
     .filter(record => new Date(record.timestamp) > cutoffTime)
     .reduce((sum, record) => sum + record.amount, 0);
+};
+
+// Build the "last 6 hours" chart data as rolling windows ending at now
+const CHART_BUCKET_MINUTES = 30;
+const CHART_BUCKETS = 12; // 12 x 30 min = 6 hours
+
+const buildRecentChartData = (records) => {
+  const now = new Date();
+  const buckets = [];
+  for (let i = CHART_BUCKETS - 1; i >= 0; i--) {
+    const end = subMinutes(now, i * CHART_BUCKET_MINUTES);
+    const start = subMinutes(end, CHART_BUCKET_MINUTES);
+    buckets.push({ start, end, total: 0 });
+  }
+  records.forEach((r) => {
+    const t = new Date(r.timestamp);
+    for (const b of buckets) {
+      if (t > b.start && t <= b.end) {
+        b.total += r.amount;
+        break;
+      }
+    }
+  });
+  return buckets.map((b) => ({ time: format(b.end, 'h:mm'), ml: Math.round(b.total * 100) / 100 }));
 };
 
 const getWaitingTime = (lastConsumptionTime, waitingMinutes) => {
@@ -36,42 +83,9 @@ const getWaitingTime = (lastConsumptionTime, waitingMinutes) => {
   return waitMinutes > 0 ? waitMinutes : 0;
 };
 
-const downloadCSV = (records, userId) => {
-  // Create CSV content
-  const headers = ['Date', 'Time', 'Amount (ml)'];
-  const csvRows = [headers];
-
-  records.forEach(record => {
-    const date = new Date(record.timestamp);
-    csvRows.push([
-      format(date, 'yyyy-MM-dd'),
-      format(date, 'HH:mm:ss'),
-      record.amount
-    ]);
-  });
-
-  // Add summary data
-  csvRows.push([]);  // Empty row
-  csvRows.push(['Total Consumption', '', records.reduce((sum, record) => sum + record.amount, 0).toFixed(1) + ' ml']);
-  
-  // Convert to CSV string
-  const csvContent = csvRows.map(row => row.join(',')).join('\n');
-  
-  // Create and trigger download
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-  const link = document.createElement('a');
-  const url = URL.createObjectURL(blob);
-  link.setAttribute('href', url);
-  link.setAttribute('download', `alcohol_consumption_${userId}_${format(new Date(), 'yyyy-MM-dd')}.csv`);
-  link.style.visibility = 'hidden';
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-};
-
 const downloadAllUsersCSV = () => {
   const users = getStoredUsers();
-  
+
   // Create CSV content
   const headers = ['User ID', 'Date', 'Time', 'Amount (ml)'];
   const csvRows = [headers];
@@ -79,24 +93,24 @@ const downloadAllUsersCSV = () => {
   // Add data for each user
   Object.entries(users).forEach(([userId, records]) => {
     if (records.length === 0) return; // Skip users with no records
-    
+
     records.forEach(record => {
       const date = new Date(record.timestamp);
       csvRows.push([
         userId,
         format(date, 'yyyy-MM-dd'),
         format(date, 'HH:mm:ss'),
-        record.amount.toFixed(1)
+        record.amount.toFixed(2)
       ]);
     });
-    
+
     // Add user summary
     csvRows.push([]);
     csvRows.push([
       `Total for ${userId}`,
       '',
       '',
-      records.reduce((sum, record) => sum + record.amount, 0).toFixed(1) + ' ml'
+      records.reduce((sum, record) => sum + record.amount, 0).toFixed(2) + ' ml'
     ]);
     csvRows.push([]); // Empty row between users
   });
@@ -106,11 +120,11 @@ const downloadAllUsersCSV = () => {
     (total, records) => total + records.reduce((sum, record) => sum + record.amount, 0),
     0
   );
-  csvRows.push(['Grand Total', '', '', grandTotal.toFixed(1) + ' ml']);
+  csvRows.push(['Grand Total', '', '', grandTotal.toFixed(2) + ' ml']);
 
   // Convert to CSV string
   const csvContent = csvRows.map(row => row.join(',')).join('\n');
-  
+
   // Create and trigger download
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const link = document.createElement('a');
@@ -123,6 +137,13 @@ const downloadAllUsersCSV = () => {
   document.body.removeChild(link);
 };
 
+// Shared style tokens
+const card = 'rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-700/70 dark:bg-gray-800/60';
+const primaryBtn =
+  'inline-flex items-center justify-center gap-2 rounded-xl bg-teal-700 px-5 py-3 font-medium text-white transition-colors hover:bg-teal-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-100 dark:bg-teal-600 dark:hover:bg-teal-500 dark:focus-visible:ring-offset-gray-950';
+const inputCls =
+  'w-full min-w-0 rounded-xl border border-gray-300 bg-white px-4 py-3 text-base text-gray-900 placeholder-gray-400 transition focus:border-teal-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600/50 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 dark:placeholder-gray-500';
+
 export default function App() {
   const [userId, setUserId] = useState('');
   const [showNewUserPrompt, setShowNewUserPrompt] = useState(false);
@@ -130,14 +151,47 @@ export default function App() {
   const [amount, setAmount] = useState('');
   const [records, setRecords] = useState([]);
   const [waitingMinutes, setWaitingMinutes] = useState(getStoredWaitingTime());
+  const [almostReadyPct, setAlmostReadyPct] = useState(() => getStoredPct('almostReadyPct', 11));
+  const [confirmPct, setConfirmPct] = useState(() => getStoredPct('confirmPct', 89));
   const [suggestions, setSuggestions] = useState([]);
   const [isInputActive, setIsInputActive] = useState(false);
+  const [allUserIds, setAllUserIds] = useState([]);
+  const [selectedLetter, setSelectedLetter] = useState('all');
+  const [justRecorded, setJustRecorded] = useState(false);
+  const [showConfig, setShowConfig] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [theme, setTheme] = useState(getInitialTheme);
+
+  // Apply theme to <html> and persist
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    try { localStorage.setItem('theme', theme); } catch (e) { /* ignore */ }
+  }, [theme]);
+
+  // One-time migration: lowercase any existing user IDs, merging duplicates
+  useEffect(() => {
+    const users = getStoredUsers();
+    let changed = false;
+    const migrated = {};
+    Object.entries(users).forEach(([id, userRecords]) => {
+      const key = normalizeId(id);
+      if (key !== id) changed = true;
+      migrated[key] = migrated[key] ? [...migrated[key], ...userRecords] : userRecords;
+    });
+    if (changed) {
+      Object.keys(migrated).forEach(key => {
+        migrated[key].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+      });
+      saveUsers(migrated);
+    }
+    setAllUserIds(Object.keys(migrated).sort());
+  }, []);
 
   // Get suggestions based on input
   useEffect(() => {
     if (userId.trim()) {
       const users = getStoredUsers();
-      const matches = Object.keys(users).filter(id => 
+      const matches = Object.keys(users).filter(id =>
         id.toLowerCase().includes(userId.toLowerCase())
       );
       setSuggestions(matches);
@@ -148,13 +202,19 @@ export default function App() {
 
   // Load and display user data when ID is entered
   const handleSearch = (selectedId = userId) => {
+    const id = normalizeId(selectedId);
+    if (!id) return;
+    // Close the autocomplete dropdown so it doesn't cover messages below
+    setIsInputActive(false);
+    setSuggestions([]);
+    // Viewing a user (vs. just recording) shows the wait warning, not the green confirmation
+    setJustRecorded(false);
     const users = getStoredUsers();
-    if (users[selectedId]) {
-      setCurrentUser(selectedId);
-      setRecords(users[selectedId]);
+    if (users[id]) {
+      setCurrentUser(id);
+      setRecords(users[id]);
       setShowNewUserPrompt(false);
-      setUserId(selectedId);
-      setSuggestions([]);
+      setUserId(id);
     } else {
       setShowNewUserPrompt(true);
       setCurrentUser(null);
@@ -169,28 +229,51 @@ export default function App() {
 
   // Create new user
   const handleCreateUser = () => {
+    const id = normalizeId(userId);
+    if (!id) return;
     const users = getStoredUsers();
-    users[userId] = [];
+    users[id] = users[id] || [];
     saveUsers(users);
-    setCurrentUser(userId);
-    setRecords([]);
+    setAllUserIds(Object.keys(users).sort());
+    setJustRecorded(false);
+    setCurrentUser(id);
+    setRecords(users[id]);
+    setUserId(id);
     setShowNewUserPrompt(false);
   };
 
-  // Add new consumption record
-  const handleAddRecord = (e) => {
-    e.preventDefault();
+  // Actually save the record
+  const commitRecord = () => {
     if (!amount || !currentUser) return;
-
     const users = getStoredUsers();
     const newRecord = {
       timestamp: new Date().toISOString(),
       amount: parseFloat(amount)
     };
-    
+
     users[currentUser] = [...(users[currentUser] || []), newRecord];
     saveUsers(users);
     setRecords(users[currentUser]);
+    setAmount('');
+    setJustRecorded(true);
+    setShowConfirm(false);
+  };
+
+  // Add new consumption record — confirm first if the last drink was very recent
+  const handleAddRecord = (e) => {
+    e.preventDefault();
+    if (!amount || !currentUser) return;
+    // Most of the wait still remaining => they just drank; confirm before adding another
+    if (lastConsumptionTime && waitingMinutes > 0 && waitingTimeNeeded / waitingMinutes >= confirmPct / 100) {
+      setShowConfirm(true);
+      return;
+    }
+    commitRecord();
+  };
+
+  // Cancel the "add another drink?" prompt and clear the entered amount
+  const cancelConfirm = () => {
+    setShowConfirm(false);
     setAmount('');
   };
 
@@ -203,170 +286,447 @@ export default function App() {
     }
   };
 
+  // Handle threshold (%) changes
+  const handleAlmostReadyPctChange = (e) => {
+    const n = parseInt(e.target.value, 10);
+    if (Number.isFinite(n) && n >= 0 && n <= 100) {
+      setAlmostReadyPct(n);
+      localStorage.setItem('almostReadyPct', String(n));
+    }
+  };
+  const handleConfirmPctChange = (e) => {
+    const n = parseInt(e.target.value, 10);
+    if (Number.isFinite(n) && n >= 0 && n <= 100) {
+      setConfirmPct(n);
+      localStorage.setItem('confirmPct', String(n));
+    }
+  };
+
   const totalConsumption = records.reduce((sum, record) => sum + record.amount, 0);
   const last2HoursConsumption = calculateRecentConsumption(records, 2);
   const lastConsumptionTime = records.length > 0 ? records[records.length - 1].timestamp : null;
-  const minutesSinceLastConsumption = lastConsumptionTime 
-    ? differenceInMinutes(new Date(), new Date(lastConsumptionTime))
-    : null;
   const waitingTimeNeeded = lastConsumptionTime ? getWaitingTime(lastConsumptionTime, waitingMinutes) : 0;
+  const nextAllowedTime = lastConsumptionTime
+    ? format(addMinutes(new Date(lastConsumptionTime), waitingMinutes), 'h:mm a')
+    : null;
+  const hasRecords = !!currentUser && records.length > 0;
+  // Still inside the waiting window (more time needed before the next drink)
+  const withinWaitWindow = !!currentUser && !!lastConsumptionTime && waitingTimeNeeded > 0;
+  // Remaining wait has dropped below the configured "almost ready" percentage
+  const isAlmostReady = withinWaitWindow && waitingMinutes > 0 && waitingTimeNeeded / waitingMinutes < almostReadyPct / 100;
+
+  // Quick-select: first letter (non-letters grouped under '#'), letter tabs, and filtered list
+  const firstLetterOf = (id) => {
+    const c = id.charAt(0).toUpperCase();
+    return c >= 'A' && c <= 'Z' ? c : '#';
+  };
+  const letterTabs = ['all', ...Array.from(new Set(allUserIds.map(firstLetterOf))).sort()];
+  const filteredUserIds = selectedLetter === 'all'
+    ? allUserIds
+    : allUserIds.filter((id) => firstLetterOf(id) === selectedLetter);
+
+  // Chart: ml per 30-min window over the last 6 hours
+  const chartData = buildRecentChartData(records);
+  const last6hTotal = chartData.reduce((sum, d) => sum + d.ml, 0);
+  const isDark = theme === 'dark';
+  const barColor = isDark ? '#2dd4bf' : '#0f766e'; // teal-400 / teal-700
+  const axisColor = isDark ? '#9ca3af' : '#6b7280'; // gray-400 / gray-500
 
   return (
-    <div className="min-h-screen bg-gray-100 dark:bg-gray-900 p-4">
-      <div className="max-w-md mx-auto">
-        <div className="flex flex-col mb-6">
-          <div className="flex justify-between items-center">
-            <h1 className="text-3xl font-bold mb-2 text-gray-800 dark:text-white">
-              Alcohol Consumption Tracker
-            </h1>
+    <div className="min-h-screen bg-gray-100 font-sans text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+      {/* Config modal */}
+      {showConfig && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/40 p-4 backdrop-blur-sm"
+          onClick={() => setShowConfig(false)}
+        >
+          <div
+            className={`${card} w-full max-w-sm p-6`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-6 flex items-center justify-between">
+              <h2 className="font-serif text-xl font-semibold text-gray-900 dark:text-white">Settings</h2>
+              <button
+                onClick={() => setShowConfig(false)}
+                className="-m-2 rounded-lg p-2 text-gray-400 transition-colors hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:hover:text-white"
+                aria-label="Close settings"
+              >
+                <X size={22} />
+              </button>
+            </div>
+
+            {/* Appearance */}
+            <div className="mb-6">
+              <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Appearance</h3>
+              <div className="inline-flex rounded-xl border border-gray-200 bg-gray-100 p-1 dark:border-gray-700 dark:bg-gray-900">
+                {[
+                  { key: 'light', label: 'Light', Icon: Sun },
+                  { key: 'dark', label: 'Dark', Icon: Moon },
+                ].map(({ key, label, Icon }) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setTheme(key)}
+                    className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 ${
+                      theme === key
+                        ? 'bg-white text-teal-700 shadow-sm dark:bg-gray-700 dark:text-teal-300'
+                        : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                    }`}
+                  >
+                    <Icon size={16} />
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Waiting Time */}
+            <div className="mb-6">
+              <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Waiting Time</h3>
+              <div className="flex items-center gap-3">
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  value={waitingMinutes}
+                  onChange={handleWaitingTimeChange}
+                  min="1"
+                  className={`${inputCls} w-24 tabular-nums`}
+                />
+                <span className="text-gray-600 dark:text-gray-300">minutes between drinks</span>
+              </div>
+            </div>
+
+            {/* Thresholds */}
+            <div className="mb-6">
+              <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                Thresholds <span className="font-normal normal-case">(% of wait remaining)</span>
+              </h3>
+              <div className="space-y-3">
+                <label className="flex items-center gap-3">
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    value={almostReadyPct}
+                    onChange={handleAlmostReadyPctChange}
+                    min="0"
+                    max="100"
+                    className={`${inputCls} w-20 tabular-nums`}
+                  />
+                  <span className="text-sm text-gray-600 dark:text-gray-300">
+                    Show <span className="font-medium text-gray-900 dark:text-gray-100">“Almost ready”</span> when below this %
+                  </span>
+                </label>
+                <label className="flex items-center gap-3">
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    value={confirmPct}
+                    onChange={handleConfirmPctChange}
+                    min="0"
+                    max="100"
+                    className={`${inputCls} w-20 tabular-nums`}
+                  />
+                  <span className="text-sm text-gray-600 dark:text-gray-300">
+                    <span className="font-medium text-gray-900 dark:text-gray-100">Confirm</span> a new drink when above this %
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <div className="my-5 border-t border-gray-200 dark:border-gray-700" />
+
+            {/* Download all users */}
             <button
               onClick={downloadAllUsersCSV}
-              className="text-purple-500 hover:text-purple-600 focus:outline-none"
-              title="Download All Users Data"
+              className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-gray-300 bg-white px-5 py-3 font-medium text-gray-700 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
             >
-              <Download size={24} />
+              <Download size={18} />
+              Download All Users Data
             </button>
           </div>
         </div>
-        
-        {/* Waiting Time Settings */}
-        <div className="mb-6 p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
-          <h3 className="font-bold mb-2 text-gray-800 dark:text-white">Waiting Time Settings</h3>
-          <div className="flex items-center gap-2">
-            <input
-              type="number"
-              value={waitingMinutes}
-              onChange={handleWaitingTimeChange}
-              min="1"
-              className="w-20 px-2 py-1 border rounded-lg bg-white dark:bg-gray-700 dark:text-white dark:border-gray-600"
-            />
-            <span className="text-gray-700 dark:text-gray-200">minutes between drinks</span>
+      )}
+
+      {/* "Add another drink?" confirmation */}
+      {showConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/40 p-4 backdrop-blur-sm"
+          onClick={cancelConfirm}
+        >
+          <div className={`${card} w-full max-w-sm p-6`} onClick={(e) => e.stopPropagation()}>
+            <div className="mb-5 flex gap-3">
+              <AlertTriangle className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" size={22} />
+              <div>
+                <h2 className="font-serif text-xl font-semibold text-gray-900 dark:text-white">Add another drink?</h2>
+                <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                  It's recommended to wait until <span className="font-medium text-gray-900 dark:text-gray-100">{nextAllowedTime}</span> (about {waitingTimeNeeded} min from now) before the next drink.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={cancelConfirm}
+                className="flex-1 rounded-xl border border-gray-300 bg-white px-5 py-3 font-medium text-gray-700 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
+              >
+                No
+              </button>
+              <button onClick={commitRecord} className={`${primaryBtn} flex-1`}>
+                Yes, add
+              </button>
+            </div>
           </div>
         </div>
-        
-        {/* User ID Input with Autocomplete */}
-        <div className="mb-6 relative">
-          <div className="flex gap-2 items-center">
-            <input
-              type="text"
-              value={userId}
-              onChange={(e) => setUserId(e.target.value)}
-              onFocus={() => setIsInputActive(true)}
-              placeholder="Enter User ID"
-              className="flex-grow px-4 py-2 border rounded-lg bg-white dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
+      )}
+
+      <div className="p-4 sm:p-8">
+        <div className={`mx-auto ${hasRecords ? 'max-w-md md:max-w-4xl' : 'max-w-md'}`}>
+          {/* Header */}
+          <header className="mb-8 flex items-start justify-between gap-3 border-b border-gray-200 pb-5 dark:border-gray-800">
+            <div>
+              <p className="text-xs font-medium uppercase tracking-[0.2em] text-teal-700 dark:text-teal-400">Beverage Monitoring</p>
+              <h1 className="mt-1 font-serif text-3xl font-semibold tracking-tight text-gray-900 sm:text-4xl dark:text-white">
+                Alcohol Tracker
+              </h1>
+            </div>
             <button
-              onClick={() => handleSearch()}
-              className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              onClick={() => setShowConfig(true)}
+              className="-m-1 shrink-0 rounded-xl p-3 text-gray-500 transition-colors hover:bg-gray-200 hover:text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-white"
+              title="Settings"
+              aria-label="Open settings"
             >
-              Search
+              <Settings size={24} />
             </button>
-          </div>
-          
-          {/* Suggestions dropdown */}
-          {suggestions.length > 0 && isInputActive && (
-            <div className="absolute z-10 w-full mt-1 bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg shadow-lg">
-              {suggestions.map((suggestion, index) => (
-                <div
-                  key={index}
-                  className="px-4 py-2 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-800 dark:text-gray-200"
-                  onClick={() => handleSuggestionClick(suggestion)}
-                >
-                  {suggestion}
+          </header>
+
+          <div className={hasRecords ? 'md:grid md:grid-cols-2 md:gap-6 md:items-start' : ''}>
+            {/* Controls column */}
+            <div>
+              {/* Quick name selector: A–Z filter + tappable name chips */}
+              {allUserIds.length > 0 && (
+                <div className="mb-6">
+                  <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Select a name</h2>
+                  <div className="flex gap-1 overflow-x-auto -mx-1 px-1 py-1">
+                    {letterTabs.map((letter) => (
+                      <button
+                        key={letter}
+                        type="button"
+                        onClick={() => setSelectedLetter(letter)}
+                        className={`shrink-0 min-w-[2.5rem] rounded-lg px-2 py-2 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 ${
+                          selectedLetter === letter
+                            ? 'bg-teal-700 text-white dark:bg-teal-600'
+                            : 'border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
+                        }`}
+                      >
+                        {letter === 'all' ? 'All' : letter}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-1 flex max-h-56 flex-wrap gap-2 overflow-y-auto -mx-1 px-1 py-1">
+                    {filteredUserIds.map((name) => (
+                      <button
+                        key={name}
+                        type="button"
+                        onClick={() => handleSearch(name)}
+                        className={`rounded-xl px-3 py-2 text-base transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 ${
+                          currentUser === name
+                            ? 'bg-teal-700 text-white dark:bg-teal-600'
+                            : 'border border-gray-200 bg-white text-gray-700 hover:border-teal-400 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 dark:hover:border-teal-500'
+                        }`}
+                      >
+                        {name}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              ))}
+              )}
+
+              {/* User ID Input with Autocomplete */}
+              <div className="relative mb-6">
+                <div className="flex items-stretch gap-2">
+                  <input
+                    type="text"
+                    value={userId}
+                    onChange={(e) => setUserId(e.target.value)}
+                    onFocus={() => setIsInputActive(true)}
+                    placeholder="Enter User ID"
+                    className={inputCls}
+                  />
+                  <button onClick={() => handleSearch()} className={`${primaryBtn} shrink-0`}>
+                    Search
+                  </button>
+                </div>
+
+                {/* Suggestions dropdown */}
+                {suggestions.length > 0 && isInputActive && (
+                  <div className="absolute z-10 mt-1 w-full overflow-hidden rounded-xl border border-gray-200 bg-white shadow-lg dark:border-gray-700 dark:bg-gray-800">
+                    {suggestions.map((suggestion, index) => (
+                      <div
+                        key={index}
+                        className="cursor-pointer px-4 py-3 text-gray-800 hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-gray-700"
+                        onClick={() => handleSuggestionClick(suggestion)}
+                      >
+                        {suggestion}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* New User Prompt */}
+              {showNewUserPrompt && (
+                <div className={`${card} mb-6 p-4`}>
+                  <p className="text-gray-700 dark:text-gray-200">User not found. Would you like to create a new user?</p>
+                  <button onClick={handleCreateUser} className={`${primaryBtn} mt-3 w-full sm:w-auto`}>
+                    Create New User
+                  </button>
+                </div>
+              )}
+
+              {/* Green confirmation — only right after clicking Add Record */}
+              {currentUser && justRecorded && withinWaitWindow && (
+                <div className="mb-6 flex gap-3 rounded-2xl border border-green-200 bg-green-50 p-4 text-green-800 dark:border-green-800/70 dark:bg-green-900/25 dark:text-green-200">
+                  <CheckCircle2 className="mt-0.5 shrink-0" size={20} />
+                  <div>
+                    <p className="font-semibold">Amount recorded</p>
+                    <p className="text-sm opacity-90">
+                      The next drink can be taken at <span className="font-medium">{nextAllowedTime}</span> (about {waitingTimeNeeded} min from now).
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Wait warning when viewing an existing user within the waiting window */}
+              {currentUser && !justRecorded && withinWaitWindow && (
+                isAlmostReady ? (
+                  <div className="mb-6 flex gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-900 dark:border-amber-700/60 dark:bg-amber-900/25 dark:text-amber-200">
+                    <Clock className="mt-0.5 shrink-0" size={20} />
+                    <div>
+                      <p className="font-semibold">Almost ready</p>
+                      <p className="text-sm opacity-90">
+                        About {waitingTimeNeeded} min left — the next drink can be taken at <span className="font-medium">{nextAllowedTime}</span>.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mb-6 flex gap-3 rounded-2xl border border-red-200 bg-red-50 p-4 text-red-800 dark:border-red-800/70 dark:bg-red-900/25 dark:text-red-200">
+                    <AlertTriangle className="mt-0.5 shrink-0" size={20} />
+                    <div>
+                      <p className="font-semibold">Please wait</p>
+                      <p className="text-sm opacity-90">
+                        About {waitingTimeNeeded} more minutes — the next drink can be taken at <span className="font-medium">{nextAllowedTime}</span>.
+                      </p>
+                    </div>
+                  </div>
+                )
+              )}
+
+              {/* Add Record Form */}
+              {currentUser && (
+                <div className={`${card} mb-6 p-5`}>
+                  <h2 className="mb-3 font-serif text-xl font-semibold text-gray-900 dark:text-white">
+                    Add record <span className="font-sans text-base font-normal text-gray-500 dark:text-gray-400">· {currentUser}</span>
+                  </h2>
+                  <form onSubmit={handleAddRecord} className="flex flex-col gap-2 sm:flex-row">
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      value={amount}
+                      onChange={(e) => setAmount(e.target.value)}
+                      placeholder="Amount (ml)"
+                      min="0"
+                      step="0.01"
+                      className={`${inputCls} tabular-nums`}
+                    />
+                    <button type="submit" className={`${primaryBtn} shrink-0`}>
+                      Add Record
+                    </button>
+                  </form>
+                  <div className="mt-3 grid grid-cols-4 gap-2 sm:grid-cols-8">
+                    {AMOUNT_PRESETS.map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setAmount(preset.toString())}
+                        className="rounded-xl border border-gray-200 bg-gray-50 py-2.5 text-base tabular-nums text-gray-700 transition-colors hover:border-teal-400 hover:bg-white active:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-teal-500 dark:hover:bg-gray-800"
+                      >
+                        {preset}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
-          )}
+
+            {/* Data column */}
+            <div>
+              {/* Consumption Statistics */}
+              {currentUser && records.length > 0 && (
+                <div className={`${card} mb-6 p-5`}>
+                  <h2 className="mb-4 font-serif text-xl font-semibold text-gray-900 dark:text-white">Statistics</h2>
+                  <dl className="space-y-3">
+                    <div className="flex items-baseline justify-between gap-4">
+                      <dt className="text-gray-500 dark:text-gray-400">Total consumption</dt>
+                      <dd className="font-medium tabular-nums text-gray-900 dark:text-gray-100">{totalConsumption.toFixed(2)} ml</dd>
+                    </div>
+                    <div className="flex items-baseline justify-between gap-4">
+                      <dt className="text-gray-500 dark:text-gray-400">Last 2 hours</dt>
+                      <dd className="font-medium tabular-nums text-gray-900 dark:text-gray-100">{last2HoursConsumption.toFixed(2)} ml</dd>
+                    </div>
+                    <div className="flex items-baseline justify-between gap-4">
+                      <dt className="text-gray-500 dark:text-gray-400">Time since last drink</dt>
+                      <dd className="font-medium text-gray-900 dark:text-gray-100">{formatDistanceToNow(new Date(records[records.length - 1].timestamp))}</dd>
+                    </div>
+                  </dl>
+
+                  {/* Last 6 hours, ml per 30-min window */}
+                  <div className="mt-5 border-t border-gray-200 pt-4 dark:border-gray-700">
+                    <p className="mb-2 text-sm font-medium text-gray-500 dark:text-gray-400">Last 6 hours</p>
+                    {last6hTotal > 0 ? (
+                      <ResponsiveContainer width="100%" height={110}>
+                        <BarChart data={chartData} margin={{ top: 16, right: 6, bottom: 0, left: 6 }}>
+                          <XAxis
+                            dataKey="time"
+                            tickLine={false}
+                            axisLine={false}
+                            interval={1}
+                            tick={{ fontSize: 10, fill: axisColor }}
+                          />
+                          <Bar dataKey="ml" fill={barColor} radius={[3, 3, 0, 0]} maxBarSize={22} isAnimationActive={false}>
+                            <LabelList
+                              dataKey="ml"
+                              position="top"
+                              formatter={(v) => (v > 0 ? v : '')}
+                              style={{ fontSize: 9, fill: axisColor }}
+                            />
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <p className="text-sm text-gray-400 dark:text-gray-500">No consumption in the last 6 hours.</p>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Records Display */}
+              {currentUser && records.length > 0 && (
+                <div className={`${card} mb-6 p-5`}>
+                  <h2 className="mb-3 font-serif text-xl font-semibold text-gray-900 dark:text-white">Records</h2>
+                  <div className="md:max-h-[55vh] md:overflow-y-auto">
+                    <ul className="divide-y divide-gray-200 dark:divide-gray-700">
+                      {records.map((record, index) => (
+                        <li key={index} className="flex items-baseline justify-between gap-4 py-3">
+                          <span className="font-medium tabular-nums text-gray-900 dark:text-gray-100">{record.amount.toFixed(2)} ml</span>
+                          <span className="text-sm text-gray-500 dark:text-gray-400">{new Date(record.timestamp).toLocaleString()}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
-
-        {/* New User Prompt */}
-        {showNewUserPrompt && (
-          <div className="mb-6 p-4 bg-yellow-100 dark:bg-yellow-900 rounded-lg">
-            <p className="text-yellow-800 dark:text-yellow-100">User not found. Would you like to create a new user?</p>
-            <button
-              onClick={handleCreateUser}
-              className="mt-2 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500"
-            >
-              Create New User
-            </button>
-          </div>
-        )}
-
-        {/* Consumption Warning */}
-        {currentUser && lastConsumptionTime && minutesSinceLastConsumption < waitingMinutes && (
-          <div className="mb-6 p-4 bg-red-100 dark:bg-red-900 rounded-lg border border-red-500">
-            <p className="font-bold text-red-800 dark:text-red-100">Warning!</p>
-            <p className="text-red-700 dark:text-red-200">
-              Please wait {waitingTimeNeeded} minutes before next consumption.
-              (Recommended {waitingMinutes} minutes between drinks)
-            </p>
-          </div>
-        )}
-
-        {/* Add Record Form */}
-        {currentUser && (
-          <div className="mb-6">
-            <h2 className="text-xl mb-2 font-semibold text-gray-800 dark:text-white">
-              Add Consumption Record for User {currentUser}
-            </h2>
-            <form onSubmit={handleAddRecord} className="flex gap-2">
-              <input
-                type="number"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                placeholder="Amount (ml)"
-                min="0"
-                step="0.1"
-                className="flex-grow px-4 py-2 border rounded-lg bg-white dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              <button
-                type="submit"
-                className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500"
-              >
-                Add Record
-              </button>
-            </form>
-          </div>
-        )}
-
-        {/* Consumption Statistics */}
-        {currentUser && records.length > 0 && (
-          <div className="mb-6 p-4 bg-blue-50 dark:bg-blue-900/50 rounded-lg">
-            <div className="flex justify-between items-center">
-              <h3 className="font-bold mb-2 text-gray-800 dark:text-white">Consumption Statistics</h3>
-              <button
-                onClick={() => downloadCSV(records, currentUser)}
-                className="text-purple-500 hover:text-purple-600 focus:outline-none"
-                title="Download User Data"
-              >
-                <Download size={20} />
-              </button>
-            </div>
-            <ul className="space-y-1 text-gray-700 dark:text-gray-200">
-              <li>Total consumption: {totalConsumption.toFixed(1)} ml</li>
-              <li>Last 2 hours: {last2HoursConsumption.toFixed(1)} ml</li>
-              <li>Time since last drink: {formatDistanceToNow(new Date(records[records.length - 1].timestamp))}</li>
-            </ul>
-          </div>
-        )}
-
-        {/* Records Display */}
-        {currentUser && records.length > 0 && (
-          <div>
-            <h2 className="text-xl mb-2 font-semibold text-gray-800 dark:text-white">Consumption Records</h2>
-            <div className="border dark:border-gray-700 rounded-lg p-4">
-              <ul className="space-y-2">
-                {records.map((record, index) => (
-                  <li key={index} className="border-b dark:border-gray-700 pb-2 text-gray-700 dark:text-gray-200">
-                    Amount: {record.amount.toFixed(1)} ml
-                    <br />
-                    Time: {new Date(record.timestamp).toLocaleString()}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
