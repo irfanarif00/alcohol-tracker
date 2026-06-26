@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { formatDistanceToNow, subHours, subMinutes, differenceInMinutes, addMinutes, format } from 'date-fns';
-import { Download, Settings, X, CheckCircle2, Clock, AlertTriangle, Sun, Moon } from 'lucide-react';
+import { Download, Upload, Settings, X, CheckCircle2, Clock, AlertTriangle, Sun, Moon, RotateCcw, Trash2, HelpCircle, Eye, EyeOff } from 'lucide-react';
 import { ResponsiveContainer, BarChart, Bar, XAxis, LabelList } from 'recharts';
 
 // Utility functions for localStorage
@@ -44,6 +44,11 @@ const normalizeId = (id) => id.trim().toLowerCase();
 // Preset amount (ml) shortcuts for quick entry
 const AMOUNT_PRESETS = [0.25, 0.5, 0.75, 0.8, 0.9, 1, 1.2, 1.5];
 
+// Default settings values (used by "Reset to defaults")
+const DEFAULT_WAITING_MINUTES = 60;
+const DEFAULT_ALMOST_READY_PCT = 11;
+const DEFAULT_CONFIRM_PCT = 89;
+
 const calculateRecentConsumption = (records, hoursAgo) => {
   const now = new Date();
   const cutoffTime = subHours(now, hoursAgo);
@@ -83,59 +88,141 @@ const getWaitingTime = (lastConsumptionTime, waitingMinutes) => {
   return waitMinutes > 0 ? waitMinutes : 0;
 };
 
-const downloadAllUsersCSV = () => {
-  const users = getStoredUsers();
+// Build the export payload: the full dataset (all users + records) as JSON.
+// Lossless and import-ready — restores the exact dataset on another device.
+const buildDataExport = () => JSON.stringify({
+  app: 'alcohol-tracker',
+  type: 'dataset',
+  version: 1,
+  exportedAt: new Date().toISOString(),
+  users: getStoredUsers(),
+});
 
-  // Create CSV content
-  const headers = ['User ID', 'Date', 'Time', 'Amount (ml)'];
-  const csvRows = [headers];
-
-  // Add data for each user
-  Object.entries(users).forEach(([userId, records]) => {
-    if (records.length === 0) return; // Skip users with no records
-
-    records.forEach(record => {
-      const date = new Date(record.timestamp);
-      csvRows.push([
-        userId,
-        format(date, 'yyyy-MM-dd'),
-        format(date, 'HH:mm:ss'),
-        record.amount.toFixed(2)
-      ]);
-    });
-
-    // Add user summary
-    csvRows.push([]);
-    csvRows.push([
-      `Total for ${userId}`,
-      '',
-      '',
-      records.reduce((sum, record) => sum + record.amount, 0).toFixed(2) + ' ml'
-    ]);
-    csvRows.push([]); // Empty row between users
-  });
-
-  // Add grand total
-  const grandTotal = Object.values(users).reduce(
-    (total, records) => total + records.reduce((sum, record) => sum + record.amount, 0),
-    0
-  );
-  csvRows.push(['Grand Total', '', '', grandTotal.toFixed(2) + ' ml']);
-
-  // Convert to CSV string
-  const csvContent = csvRows.map(row => row.join(',')).join('\n');
-
-  // Create and trigger download
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-  const link = document.createElement('a');
+const triggerDownload = (content, filename, mime) => {
+  const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
   link.setAttribute('href', url);
-  link.setAttribute('download', `all_users_alcohol_consumption_${format(new Date(), 'yyyy-MM-dd')}.csv`);
+  link.setAttribute('download', filename);
   link.style.visibility = 'hidden';
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 };
+
+// Base64-encode a byte buffer (chunked to stay within call-stack limits)
+const toBase64 = (buffer) => {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+};
+
+const PBKDF2_ITERATIONS = 250000;
+
+// Encrypt text with a passphrase: PBKDF2-SHA256 -> AES-256-GCM
+const encryptText = async (plaintext, passphrase) => {
+  const enc = new TextEncoder();
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']
+  );
+  const key = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt']
+  );
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(plaintext));
+  return {
+    format: 'alcohol-tracker-encrypted',
+    version: 1,
+    algorithm: 'AES-256-GCM',
+    kdf: 'PBKDF2-SHA256',
+    iterations: PBKDF2_ITERATIONS,
+    salt: toBase64(salt),
+    iv: toBase64(iv),
+    ciphertext: toBase64(ciphertext),
+  };
+};
+
+// Encrypt the full dataset and download it as an encrypted .json envelope
+const downloadEncryptedData = async (passphrase) => {
+  const data = buildDataExport();
+  const payload = await encryptText(data, passphrase);
+  const filename = `alcohol_tracker_backup_${format(new Date(), 'yyyy-MM-dd')}.json`;
+  triggerDownload(JSON.stringify(payload, null, 2), filename, 'application/json');
+};
+
+const fromBase64 = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+
+// Decrypt an encrypted-export payload back to plaintext (throws on wrong passphrase)
+const decryptText = async (payload, passphrase) => {
+  const enc = new TextEncoder();
+  const salt = fromBase64(payload.salt);
+  const iv = fromBase64(payload.iv);
+  const ciphertext = fromBase64(payload.ciphertext);
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']
+  );
+  const key = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: payload.iterations, hash: 'SHA-256' },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['decrypt']
+  );
+  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+  return new TextDecoder().decode(plaintext);
+};
+
+// Merge imported users into existing ones: normalize IDs to lowercase, merge
+// records, drop exact duplicates (same timestamp+amount), and sort chronologically
+const normalizeAndMerge = (existingUsers, importedUsers) => {
+  const result = {};
+  const add = (id, recs) => {
+    const key = normalizeId(id);
+    result[key] = [...(result[key] || []), ...(Array.isArray(recs) ? recs : [])];
+  };
+  Object.entries(existingUsers).forEach(([id, recs]) => add(id, recs));
+  Object.entries(importedUsers).forEach(([id, recs]) => add(id, recs));
+  Object.keys(result).forEach((key) => {
+    const seen = new Set();
+    result[key] = result[key]
+      .filter((r) => {
+        const sig = `${r.timestamp}|${r.amount}`;
+        if (seen.has(sig)) return false;
+        seen.add(sig);
+        return true;
+      })
+      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  });
+  return result;
+};
+
+// Node.js snippet shown in the help popup for decrypting an export
+const DECRYPT_SNIPPET = `const fs = require('fs');
+const crypto = require('crypto');
+
+const pass = 'YOUR_PASSPHRASE';
+const f = JSON.parse(fs.readFileSync('backup.json', 'utf8'));
+const salt = Buffer.from(f.salt, 'base64');
+const iv = Buffer.from(f.iv, 'base64');
+const blob = Buffer.from(f.ciphertext, 'base64');
+const data = blob.subarray(0, blob.length - 16);   // ciphertext
+const tag = blob.subarray(blob.length - 16);        // GCM auth tag
+const key = crypto.pbkdf2Sync(pass, salt, f.iterations, 32, 'sha256');
+const d = crypto.createDecipheriv('aes-256-gcm', key, iv);
+d.setAuthTag(tag);
+const json = Buffer.concat([d.update(data), d.final()]).toString('utf8');
+fs.writeFileSync('decrypted.json', json);
+console.log('Wrote decrypted.json');`;
 
 // Shared style tokens
 const card = 'rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-700/70 dark:bg-gray-800/60';
@@ -160,6 +247,22 @@ export default function App() {
   const [justRecorded, setJustRecorded] = useState(false);
   const [showConfig, setShowConfig] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [resetConfirm, setResetConfirm] = useState(null); // null | 'defaults' | 'data'
+  const [showEncryptPrompt, setShowEncryptPrompt] = useState(false);
+  const [showEncryptHelp, setShowEncryptHelp] = useState(false);
+  const [passphrase, setPassphrase] = useState('');
+  const [passphraseConfirm, setPassphraseConfirm] = useState('');
+  const [showPass1, setShowPass1] = useState(false);
+  const [showPass2, setShowPass2] = useState(false);
+  const [encryptBusy, setEncryptBusy] = useState(false);
+  const [encryptError, setEncryptError] = useState('');
+  const [showImport, setShowImport] = useState(false);
+  const [importFile, setImportFile] = useState(null);
+  const [importPassphrase, setImportPassphrase] = useState('');
+  const [importMode, setImportMode] = useState('merge'); // 'merge' | 'replace'
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState('');
+  const [importSuccess, setImportSuccess] = useState('');
   const [theme, setTheme] = useState(getInitialTheme);
 
   // Apply theme to <html> and persist
@@ -275,6 +378,126 @@ export default function App() {
   const cancelConfirm = () => {
     setShowConfirm(false);
     setAmount('');
+  };
+
+  // Reset settings (waiting time + thresholds) to their defaults
+  const handleResetDefaults = () => {
+    setWaitingMinutes(DEFAULT_WAITING_MINUTES);
+    saveWaitingTime(DEFAULT_WAITING_MINUTES);
+    setAlmostReadyPct(DEFAULT_ALMOST_READY_PCT);
+    localStorage.setItem('almostReadyPct', String(DEFAULT_ALMOST_READY_PCT));
+    setConfirmPct(DEFAULT_CONFIRM_PCT);
+    localStorage.setItem('confirmPct', String(DEFAULT_CONFIRM_PCT));
+    setResetConfirm(null);
+  };
+
+  // Permanently delete all users and their records
+  const handleResetData = () => {
+    saveUsers({});
+    setAllUserIds([]);
+    setCurrentUser(null);
+    setRecords([]);
+    setUserId('');
+    setSuggestions([]);
+    setShowNewUserPrompt(false);
+    setJustRecorded(false);
+    setSelectedLetter('all');
+    setResetConfirm(null);
+  };
+
+  // Encrypt the all-users CSV with the entered passphrase and download it
+  const handleEncryptDownload = async () => {
+    if (!passphrase) {
+      setEncryptError('Please enter a passphrase.');
+      return;
+    }
+    if (passphrase !== passphraseConfirm) {
+      setEncryptError("Passphrases don't match.");
+      return;
+    }
+    try {
+      setEncryptBusy(true);
+      setEncryptError('');
+      await downloadEncryptedData(passphrase);
+      setShowEncryptPrompt(false);
+      setPassphrase('');
+      setPassphraseConfirm('');
+      setShowPass1(false);
+      setShowPass2(false);
+    } catch (err) {
+      setEncryptError('Encryption failed: ' + (err && err.message ? err.message : 'unknown error'));
+    } finally {
+      setEncryptBusy(false);
+    }
+  };
+
+  const cancelEncrypt = () => {
+    setShowEncryptPrompt(false);
+    setPassphrase('');
+    setPassphraseConfirm('');
+    setShowPass1(false);
+    setShowPass2(false);
+    setEncryptError('');
+  };
+
+  // Decrypt a backup file with the entered passphrase and merge it into the data
+  const handleImport = async () => {
+    if (!importFile) { setImportError('Choose a backup file.'); return; }
+    if (!importPassphrase) { setImportError('Enter the passphrase.'); return; }
+    try {
+      setImportBusy(true);
+      setImportError('');
+      setImportSuccess('');
+      const text = await importFile.text();
+      let payload;
+      try { payload = JSON.parse(text); } catch { throw new Error('That file is not a valid backup (not JSON).'); }
+      if (!payload || !payload.ciphertext || !payload.salt || !payload.iv || !payload.iterations) {
+        throw new Error('That file is not a recognized encrypted backup.');
+      }
+      let plaintext;
+      try {
+        plaintext = await decryptText(payload, importPassphrase);
+      } catch {
+        throw new Error('Incorrect passphrase, or the file is corrupted.');
+      }
+      let dataset;
+      try { dataset = JSON.parse(plaintext); } catch { throw new Error('Decrypted data is not valid.'); }
+      const importedUsers = dataset && typeof dataset.users === 'object' && dataset.users ? dataset.users : null;
+      if (!importedUsers) throw new Error('Decrypted file is not a valid dataset.');
+
+      // Merge into existing, or replace existing entirely (still normalize + dedup)
+      const base = importMode === 'replace' ? {} : getStoredUsers();
+      const merged = normalizeAndMerge(base, importedUsers);
+      saveUsers(merged);
+      setAllUserIds(Object.keys(merged).sort());
+      const n = Object.keys(importedUsers).length;
+      setImportSuccess(
+        importMode === 'replace'
+          ? `Replaced all data with ${n} imported user${n === 1 ? '' : 's'}.`
+          : `Imported and merged ${n} user${n === 1 ? '' : 's'}.`
+      );
+      setImportFile(null);
+      setImportPassphrase('');
+      // Refresh the currently-viewed user (if any) from the merged data
+      if (currentUser) {
+        const key = normalizeId(currentUser);
+        setRecords(merged[key] || []);
+        setCurrentUser(merged[key] ? key : null);
+      }
+    } catch (err) {
+      setImportError(err && err.message ? err.message : 'Import failed.');
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const cancelImport = () => {
+    setShowImport(false);
+    setImportFile(null);
+    setImportPassphrase('');
+    setImportMode('merge');
+    setImportError('');
+    setImportSuccess('');
   };
 
   // Handle waiting time change
@@ -435,14 +658,98 @@ export default function App() {
 
             <div className="my-5 border-t border-gray-200 dark:border-gray-700" />
 
-            {/* Download all users */}
+            {/* Download all users (encrypted) + help */}
+            <div className="flex gap-2">
+              <button
+                onClick={() => { setEncryptError(''); setShowEncryptPrompt(true); }}
+                className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl border border-gray-300 bg-white px-5 py-3 font-medium text-gray-700 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
+              >
+                <Download size={18} />
+                Download All Users Data
+              </button>
+              <button
+                onClick={() => setShowEncryptHelp(true)}
+                className="inline-flex shrink-0 items-center justify-center rounded-xl border border-gray-300 bg-white px-3 text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-white"
+                title="How encryption works"
+                aria-label="How encryption works"
+              >
+                <HelpCircle size={20} />
+              </button>
+            </div>
+
             <button
-              onClick={downloadAllUsersCSV}
-              className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-gray-300 bg-white px-5 py-3 font-medium text-gray-700 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
+              onClick={() => { setImportError(''); setImportSuccess(''); setShowImport(true); }}
+              className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-gray-300 bg-white px-5 py-3 font-medium text-gray-700 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
             >
-              <Download size={18} />
-              Download All Users Data
+              <Upload size={18} />
+              Import Backup
             </button>
+
+            <div className="my-5 border-t border-gray-200 dark:border-gray-700" />
+
+            <div className="space-y-2">
+              <button
+                onClick={() => setResetConfirm('defaults')}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-gray-300 bg-white px-5 py-3 font-medium text-gray-700 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
+              >
+                <RotateCcw size={18} />
+                Reset to Defaults
+              </button>
+              <button
+                onClick={() => setResetConfirm('data')}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-red-300 bg-white px-5 py-3 font-medium text-red-700 transition-colors hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 dark:border-red-800/70 dark:bg-gray-900 dark:text-red-400 dark:hover:bg-red-900/20"
+              >
+                <Trash2 size={18} />
+                Reset Data
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reset confirmation */}
+      {resetConfirm && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-gray-900/50 p-4 backdrop-blur-sm"
+          onClick={() => setResetConfirm(null)}
+        >
+          <div className={`${card} w-full max-w-sm p-6`} onClick={(e) => e.stopPropagation()}>
+            <div className="mb-5 flex gap-3">
+              <AlertTriangle
+                className={`mt-0.5 shrink-0 ${resetConfirm === 'data' ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'}`}
+                size={22}
+              />
+              <div>
+                <h2 className="font-serif text-xl font-semibold text-gray-900 dark:text-white">
+                  {resetConfirm === 'data' ? 'Reset all data?' : 'Reset settings to defaults?'}
+                </h2>
+                <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                  {resetConfirm === 'data'
+                    ? 'This permanently deletes all users and their records. This cannot be undone.'
+                    : `Waiting time and thresholds will return to their defaults (${DEFAULT_WAITING_MINUTES} min, ${DEFAULT_ALMOST_READY_PCT}% / ${DEFAULT_CONFIRM_PCT}%).`}
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setResetConfirm(null)}
+                className="flex-1 rounded-xl border border-gray-300 bg-white px-5 py-3 font-medium text-gray-700 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
+              >
+                Cancel
+              </button>
+              {resetConfirm === 'data' ? (
+                <button
+                  onClick={handleResetData}
+                  className="inline-flex flex-1 items-center justify-center rounded-xl bg-red-600 px-5 py-3 font-medium text-white transition-colors hover:bg-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-100 dark:focus-visible:ring-offset-gray-950"
+                >
+                  Delete all
+                </button>
+              ) : (
+                <button onClick={handleResetDefaults} className={`${primaryBtn} flex-1`}>
+                  Reset
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -473,6 +780,202 @@ export default function App() {
               <button onClick={commitRecord} className={`${primaryBtn} flex-1`}>
                 Yes, add
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Encrypt & download passphrase prompt */}
+      {showEncryptPrompt && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-gray-900/50 p-4 backdrop-blur-sm"
+          onClick={cancelEncrypt}
+        >
+          <div className={`${card} w-full max-w-sm p-6`} onClick={(e) => e.stopPropagation()}>
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="font-serif text-xl font-semibold text-gray-900 dark:text-white">Encrypt &amp; download</h2>
+              <button
+                onClick={cancelEncrypt}
+                className="-m-2 rounded-lg p-2 text-gray-400 transition-colors hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:hover:text-white"
+                aria-label="Close"
+              >
+                <X size={22} />
+              </button>
+            </div>
+            <p className="mb-3 text-sm text-gray-600 dark:text-gray-300">
+              Enter a passphrase. Your full dataset is encrypted with it (AES-256-GCM) for backup/transfer to another device. You'll need this exact passphrase to restore it — it cannot be recovered.
+            </p>
+            <form onSubmit={(e) => { e.preventDefault(); handleEncryptDownload(); }} className="space-y-3">
+              <div className="relative">
+                <input
+                  type={showPass1 ? 'text' : 'password'}
+                  value={passphrase}
+                  onChange={(e) => setPassphrase(e.target.value)}
+                  placeholder="Passphrase"
+                  autoComplete="new-password"
+                  className={`${inputCls} pr-12`}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPass1((v) => !v)}
+                  className="absolute inset-y-0 right-0 flex items-center px-3 text-gray-400 transition-colors hover:text-gray-700 focus:outline-none focus-visible:text-teal-600 dark:hover:text-white"
+                  aria-label={showPass1 ? 'Hide passphrase' : 'Show passphrase'}
+                  tabIndex={-1}
+                >
+                  {showPass1 ? <EyeOff size={20} /> : <Eye size={20} />}
+                </button>
+              </div>
+              <div className="relative">
+                <input
+                  type={showPass2 ? 'text' : 'password'}
+                  value={passphraseConfirm}
+                  onChange={(e) => setPassphraseConfirm(e.target.value)}
+                  placeholder="Confirm passphrase"
+                  autoComplete="new-password"
+                  className={`${inputCls} pr-12`}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPass2((v) => !v)}
+                  className="absolute inset-y-0 right-0 flex items-center px-3 text-gray-400 transition-colors hover:text-gray-700 focus:outline-none focus-visible:text-teal-600 dark:hover:text-white"
+                  aria-label={showPass2 ? 'Hide passphrase' : 'Show passphrase'}
+                  tabIndex={-1}
+                >
+                  {showPass2 ? <EyeOff size={20} /> : <Eye size={20} />}
+                </button>
+              </div>
+              {encryptError && <p className="text-sm text-red-600 dark:text-red-400">{encryptError}</p>}
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={cancelEncrypt}
+                  className="flex-1 rounded-xl border border-gray-300 bg-white px-5 py-3 font-medium text-gray-700 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
+                >
+                  Cancel
+                </button>
+                <button type="submit" disabled={encryptBusy} className={`${primaryBtn} flex-1 disabled:opacity-60`}>
+                  {encryptBusy ? 'Encrypting…' : 'Encrypt & Download'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Import backup */}
+      {showImport && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-gray-900/50 p-4 backdrop-blur-sm"
+          onClick={cancelImport}
+        >
+          <div className={`${card} w-full max-w-sm p-6`} onClick={(e) => e.stopPropagation()}>
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="font-serif text-xl font-semibold text-gray-900 dark:text-white">Import backup</h2>
+              <button
+                onClick={cancelImport}
+                className="-m-2 rounded-lg p-2 text-gray-400 transition-colors hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:hover:text-white"
+                aria-label="Close"
+              >
+                <X size={22} />
+              </button>
+            </div>
+            <p className="mb-3 text-sm text-gray-600 dark:text-gray-300">
+              Choose an encrypted backup file and enter its passphrase. User names are normalized to lowercase on import.
+            </p>
+            <div className="mb-3">
+              <div className="inline-flex rounded-xl border border-gray-200 bg-gray-100 p-1 dark:border-gray-700 dark:bg-gray-900">
+                {[{ key: 'merge', label: 'Merge' }, { key: 'replace', label: 'Replace' }].map(({ key, label }) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setImportMode(key)}
+                    className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 ${
+                      importMode === key
+                        ? 'bg-white text-teal-700 shadow-sm dark:bg-gray-700 dark:text-teal-300'
+                        : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                {importMode === 'merge'
+                  ? 'Adds imported users to the current data; exact duplicate records are skipped.'
+                  : 'Deletes all current data first, then loads only the imported data.'}
+              </p>
+            </div>
+            <form onSubmit={(e) => { e.preventDefault(); handleImport(); }} className="space-y-3">
+              <input
+                type="file"
+                accept=".json,application/json"
+                onChange={(e) => { setImportFile(e.target.files && e.target.files[0] ? e.target.files[0] : null); setImportError(''); setImportSuccess(''); }}
+                className="block w-full text-sm text-gray-600 file:mr-3 file:rounded-lg file:border-0 file:bg-teal-700 file:px-4 file:py-2 file:font-medium file:text-white hover:file:bg-teal-800 dark:text-gray-300 dark:file:bg-teal-600 dark:hover:file:bg-teal-500"
+              />
+              <input
+                type="password"
+                value={importPassphrase}
+                onChange={(e) => setImportPassphrase(e.target.value)}
+                placeholder="Passphrase"
+                autoComplete="off"
+                className={inputCls}
+              />
+              {importError && <p className="text-sm text-red-600 dark:text-red-400">{importError}</p>}
+              {importSuccess && <p className="text-sm text-green-700 dark:text-green-400">{importSuccess}</p>}
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={cancelImport}
+                  className="flex-1 rounded-xl border border-gray-300 bg-white px-5 py-3 font-medium text-gray-700 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
+                >
+                  {importSuccess ? 'Done' : 'Cancel'}
+                </button>
+                <button type="submit" disabled={importBusy} className={`${primaryBtn} flex-1 disabled:opacity-60`}>
+                  {importBusy ? 'Importing…' : 'Import'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Encryption help */}
+      {showEncryptHelp && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-gray-900/50 p-4 backdrop-blur-sm"
+          onClick={() => setShowEncryptHelp(false)}
+        >
+          <div className={`${card} max-h-[85vh] w-full max-w-lg overflow-y-auto p-6`} onClick={(e) => e.stopPropagation()}>
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="font-serif text-xl font-semibold text-gray-900 dark:text-white">How the encryption works</h2>
+              <button
+                onClick={() => setShowEncryptHelp(false)}
+                className="-m-2 rounded-lg p-2 text-gray-400 transition-colors hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 dark:hover:text-white"
+                aria-label="Close"
+              >
+                <X size={22} />
+              </button>
+            </div>
+            <div className="space-y-3 text-sm text-gray-600 dark:text-gray-300">
+              <p>The export is your full dataset (all users and records) as JSON, encrypted with a passphrase you choose, using the browser's built-in Web Crypto API. The file is encrypted-only — it contains no readable data, just the cipher parameters and ciphertext.</p>
+              <ul className="list-disc space-y-1 pl-5">
+                <li>Cipher: <span className="font-medium text-gray-900 dark:text-gray-100">AES-256-GCM</span> (authenticated encryption).</li>
+                <li>Key derivation: <span className="font-medium text-gray-900 dark:text-gray-100">PBKDF2-SHA256</span>, {PBKDF2_ITERATIONS.toLocaleString()} iterations, with a random 16-byte salt.</li>
+                <li>A fresh random 12-byte IV is generated for every export.</li>
+              </ul>
+              <p>
+                The downloaded <code className="rounded bg-gray-100 px-1 dark:bg-gray-700">.json</code> file stores
+                {' '}<code className="rounded bg-gray-100 px-1 dark:bg-gray-700">algorithm</code>,
+                {' '}<code className="rounded bg-gray-100 px-1 dark:bg-gray-700">kdf</code>,
+                {' '}<code className="rounded bg-gray-100 px-1 dark:bg-gray-700">iterations</code>,
+                {' '}<code className="rounded bg-gray-100 px-1 dark:bg-gray-700">salt</code>,
+                {' '}<code className="rounded bg-gray-100 px-1 dark:bg-gray-700">iv</code>, and
+                {' '}<code className="rounded bg-gray-100 px-1 dark:bg-gray-700">ciphertext</code> (salt, iv and ciphertext are base64).
+                The passphrase itself is never stored — keep it safe, it cannot be recovered.
+              </p>
+              <p className="font-medium text-gray-900 dark:text-gray-100">To decrypt (Node.js):</p>
+              <pre className="overflow-x-auto rounded-lg bg-gray-900 p-3 text-xs leading-relaxed text-gray-100">{DECRYPT_SNIPPET}</pre>
+              <p>Replace <code className="rounded bg-gray-100 px-1 dark:bg-gray-700">YOUR_PASSPHRASE</code> and the input filename, then run it with Node. It writes <code className="rounded bg-gray-100 px-1 dark:bg-gray-700">decrypted.json</code> — the full dataset, ready to import.</p>
             </div>
           </div>
         </div>
